@@ -1,5 +1,40 @@
 # validation_at_pi4__gphoto2-rs
 
+Small Raspberry Pi validation harness for [gphoto2-rs](https://github.com/maxicarlos08/gphoto2-rs).
+
+This repo is meant to run on `id2-rpi4` with the Canon EOS 6D attached over
+local USB.
+
+## Validate
+
+```sh
+cargo run -- doctor
+```
+
+Expected camera gate:
+
+```text
+Model                          Port
+----------------------------------------------------------
+Canon EOS 6D                   usb:001,004
+CAMERA_GREEN model="Canon EOS 6D"
+```
+
+Capture one photo:
+
+```sh
+cargo run -- capture
+```
+
+Or choose an explicit output path:
+
+```sh
+cargo run -- capture captures/test.jpg
+```
+
+The program prints `CAPTURE_GREEN path=...` after the downloaded image is
+present and non-empty.
+
 ## Devcontainer
 
 This repo includes a devcontainer intended to run on the Linux Raspberry Pi host

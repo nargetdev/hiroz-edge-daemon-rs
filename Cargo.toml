@@ -1,0 +1,10 @@
+[package]
+name = "validation_at_pi4_gphoto2_rs"
+version = "0.1.0"
+edition = "2021"
+description = "Raspberry Pi validation harness for capturing one DSLR photo with gphoto2-rs"
+
+[dependencies]
+anyhow = "1"
+gphoto2 = "3.4"
+

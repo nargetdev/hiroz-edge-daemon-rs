@@ -1,7 +1,12 @@
-# LAN context:
-there's a pi at id2-rpi4@id2-rpi4
+# host context:
+we are running locally on the Raspberry Pi host itself:
 
-🤔{✅/❌} we have access to it?
+```validate host
+id2-rpi4@id2-rpi4:~ $ hostname
+id2-rpi4
+```
+
+🤔{✅/❌} this working context is already on `id2-rpi4@id2-rpi4`
 
 # rust libs context
 there's a gphoto2 lib for rust at
@@ -13,7 +18,7 @@ https://github.com/maxicarlos08/gphoto2-rs
 
 
 # DSLR camera context
-🤔{✅/❌} that pi has a Canon EOS 6D on the USB bus
+🤔{✅/❌} this Pi has a Canon EOS 6D on the local USB bus
 
 ```validate DSLR
 id2-rpi4@id2-rpi4:~ $ gphoto2 --auto-detect
@@ -29,3 +34,6 @@ Given all context gates are passing (✅) accomplish goal #1:
 
 ((GOAL #1))
 snap a single photo from the camera .. mmmkay
+
+display the image we got
+🤔{✅/❌} [[show the image]]
