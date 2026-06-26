@@ -1,15 +1,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
-use gphoto2::widget::RadioWidget;
-use gphoto2::Context;
+use gphoto2::{widget::RadioWidget, Context as GPhotoContext};
+use hiroz::{context::ZContextBuilder, Builder};
+use hiroz_msgs::std_msgs::String as RosString;
 
 const DEFAULT_CAPTURE_DIR: &str = "captures";
+const CHATTER_TOPIC: &str = "/chatter";
+const DEFAULT_CHATTER_TIMEOUT_SECS: u64 = 15;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "capture".to_string());
 
@@ -24,6 +28,18 @@ fn main() -> Result<()> {
         "source" => {
             println!("{}", gphoto2_source_path()?.display());
             Ok(())
+        }
+        "chatter-listen" => {
+            let timeout = args
+                .next()
+                .map(|s| parse_timeout(&s))
+                .transpose()?
+                .unwrap_or_else(|| Duration::from_secs(DEFAULT_CHATTER_TIMEOUT_SECS));
+            listen_chatter(timeout).await
+        }
+        "chatter-publish" => {
+            let message = args.next().unwrap_or_else(chirp_message);
+            publish_chatter(message).await
         }
         "-h" | "--help" | "help" => {
             print_help();
@@ -41,6 +57,8 @@ fn print_help() {
     println!("  cargo run -- doctor");
     println!("  cargo run -- capture [output-path]");
     println!("  cargo run -- source");
+    println!("  cargo run -- chatter-listen [timeout-seconds]");
+    println!("  cargo run -- chatter-publish [message]");
 }
 
 fn doctor() -> Result<()> {
@@ -79,7 +97,7 @@ fn capture_one(output: Option<&Path>) -> Result<PathBuf> {
             .with_context(|| format!("create capture directory {}", parent.display()))?;
     }
 
-    let context = Context::new().context("create gphoto2 context")?;
+    let context = GPhotoContext::new().context("create gphoto2 context")?;
     let camera = context
         .autodetect_camera()
         .wait()
@@ -112,6 +130,77 @@ fn capture_one(output: Option<&Path>) -> Result<PathBuf> {
     );
 
     Ok(output)
+}
+
+async fn listen_chatter(timeout: Duration) -> Result<()> {
+    let ctx = ZContextBuilder::default()
+        .build()
+        .map_err(|e| anyhow!("build hiroz context: {e}"))?;
+    let node = ctx
+        .create_node("gphoto2_rs_chatter_listener")
+        .build()
+        .map_err(|e| anyhow!("create hiroz listener node: {e}"))?;
+    let sub = node
+        .create_sub::<RosString>(CHATTER_TOPIC)
+        .build()
+        .map_err(|e| anyhow!("subscribe to {CHATTER_TOPIC}: {e}"))?;
+
+    println!(
+        "CHATTER_LISTEN waiting topic={} timeout_secs={}",
+        CHATTER_TOPIC,
+        timeout.as_secs()
+    );
+
+    let message = tokio::time::timeout(timeout, sub.async_recv())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for {CHATTER_TOPIC} after {timeout:?}"))?
+        .map_err(|e| anyhow!("receive {CHATTER_TOPIC}: {e}"))?;
+
+    println!("CHATTER_SUBSCRIBE_GREEN data={:?}", message.data);
+    Ok(())
+}
+
+async fn publish_chatter(message: String) -> Result<()> {
+    let ctx = ZContextBuilder::default()
+        .build()
+        .map_err(|e| anyhow!("build hiroz context: {e}"))?;
+    let node = ctx
+        .create_node("gphoto2_rs_chatter_talker")
+        .build()
+        .map_err(|e| anyhow!("create hiroz talker node: {e}"))?;
+    let publisher = node
+        .create_pub::<RosString>(CHATTER_TOPIC)
+        .build()
+        .map_err(|e| anyhow!("create publisher for {CHATTER_TOPIC}: {e}"))?;
+
+    let msg = RosString { data: message };
+    publisher
+        .async_publish(&msg)
+        .await
+        .map_err(|e| anyhow!("publish {CHATTER_TOPIC}: {e}"))?;
+
+    println!("CHATTER_PUBLISH_GREEN data={:?}", msg.data);
+    Ok(())
+}
+
+fn parse_timeout(s: &str) -> Result<Duration> {
+    let secs = s
+        .parse::<u64>()
+        .with_context(|| format!("parse timeout seconds from '{s}'"))?;
+    Ok(Duration::from_secs(secs))
+}
+
+fn chirp_message() -> String {
+    let datetime = run_text("date", &["--iso-8601=seconds"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| {
+            let secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            format!("unix:{secs}")
+        });
+    format!("CHIRP CHIRP! From gphoto2-rs :: {datetime}")
 }
 
 fn select_jpeg(camera: &gphoto2::Camera) -> Result<String> {
