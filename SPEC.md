@@ -37,3 +37,30 @@ snap a single photo from the camera .. mmmkay
 
 display the image we got
 🤔{✅/❌} [[show the image]]
+
+
+# Hiroz integration #
+
+using the following zenoh config
+
+```sh
+export ZENOH_CONFIG_OVERRIDE='mode="client";connect/endpoints=["tcp/172.31.1.252:7447"]'
+```
+
+using hiroz [ZettaScaleLabs/hiroz](https://github.com/ZettaScaleLabs/hiroz)
+
+🤔{✅/❌} using hiroz we are able to receive a ROS2 zenoh CDR message for ROS topic `/chatter`
+
+like ...
+
+```text
+data: 'Hello World: 251980'
+```
+
+🤔{✅/❌} using hiroz we are able also to publish our own custom message to `/chatter`
+
+like:
+
+```text
+CHIRP CHIRP! From gphoto2-rs :: `datetime`
+```
