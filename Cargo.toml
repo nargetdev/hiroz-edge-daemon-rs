@@ -8,5 +8,6 @@ description = "Raspberry Pi validation harness for capturing one DSLR photo with
 anyhow = "1"
 gphoto2 = "3.4"
 hiroz = { git = "https://github.com/ZettaScaleLabs/hiroz", rev = "7742f0dc187b025e2ac78d3d9947e1ad8b51f81d", default-features = false, features = ["config-builders", "rmw-zenoh", "jazzy"] }
-hiroz-msgs = { git = "https://github.com/ZettaScaleLabs/hiroz", rev = "7742f0dc187b025e2ac78d3d9947e1ad8b51f81d", default-features = false, features = ["std_msgs", "jazzy"] }
+hiroz-msgs = { git = "https://github.com/ZettaScaleLabs/hiroz", rev = "7742f0dc187b025e2ac78d3d9947e1ad8b51f81d", default-features = false, features = ["std_msgs", "sensor_msgs", "jazzy"] }
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

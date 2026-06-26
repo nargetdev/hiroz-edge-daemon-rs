@@ -1,16 +1,158 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context as AnyhowContext, Result};
-use gphoto2::{widget::RadioWidget, Context as GPhotoContext};
-use hiroz::{context::ZContextBuilder, Builder};
-use hiroz_msgs::std_msgs::String as RosString;
+use gphoto2::{camera::CameraEvent, widget::RadioWidget, Context as GPhotoContext};
+use hiroz::{
+    context::ZContextBuilder,
+    msg::{SerdeCdrSerdes, ZMessage, ZService},
+    Builder, ServiceTypeInfo, TypeHash, TypeInfo, ZBuf,
+};
+use hiroz_msgs::{
+    builtin_interfaces::Time as RosTime,
+    sensor_msgs::CompressedImage,
+    std_msgs::{ByteMultiArray, Header, MultiArrayLayout, String as RosString},
+};
 
 const DEFAULT_CAPTURE_DIR: &str = "captures";
 const CHATTER_TOPIC: &str = "/chatter";
 const DEFAULT_CHATTER_TIMEOUT_SECS: u64 = 15;
+const DEFAULT_SERVICE_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_SHUTTERSPEED: u8 = 30;
+const DEFAULT_ISO: u8 = 7;
+const DEFAULT_APERTURE: u8 = 9;
+const DEFAULT_IMAGEFORMAT: u8 = 24;
+const DSLR_NODE_NAME: &str = "gphoto2_rs_dslr_capture";
+
+const SHUTTERSPEEDS: &[&str] = &[
+    "30", "25", "20", "15", "13", "10.3", "8", "6.3", "5", "4", "3.2", "2.5", "2", "1.6", "1.3",
+    "1", "0.8", "0.6", "0.5", "0.4", "0.3", "1/4", "1/5", "1/6", "1/8", "1/10", "1/13", "1/15",
+    "1/20", "1/25", "1/30", "1/40", "1/50", "1/60", "1/80", "1/100", "1/125", "1/160", "1/200",
+    "1/250", "1/320", "1/400", "1/500", "1/640", "1/800", "1/1000", "1/1250", "1/1600", "1/2000",
+    "1/2500", "1/3200", "1/4000",
+];
+const ISOS: &[&str] = &[
+    "Auto", "100", "125", "160", "200", "250", "320", "400", "500", "640", "800", "1000", "1250",
+    "1600", "2000", "2500", "3200", "4000", "5000", "6400",
+];
+const APERTURES: &[&str] = &[
+    "2.8", "3.2", "3.5", "4", "4.5", "5", "5.6", "6.3", "7.1", "8", "9", "10", "11", "13", "14",
+    "16", "18", "20", "22", "25", "29", "32",
+];
+const IMAGEFORMATS: &[&str] = &[
+    "Large Fine JPEG",
+    "Large Normal JPEG",
+    "Medium Fine JPEG",
+    "Medium Normal JPEG",
+    "Small Fine JPEG",
+    "Small Normal JPEG",
+    "Smaller JPEG",
+    "Tiny JPEG",
+    "RAW + Large Fine JPEG",
+    "RAW + Large Normal JPEG",
+    "RAW + Medium Fine JPEG",
+    "RAW + Medium Normal JPEG",
+    "RAW + Small Fine JPEG",
+    "RAW + Small Normal JPEG",
+    "RAW + Smaller JPEG",
+    "RAW + Tiny JPEG",
+    "mRAW + Large Fine JPEG",
+    "mRAW + Large Normal JPEG",
+    "mRAW + Medium Fine JPEG",
+    "mRAW + Medium Normal JPEG",
+    "mRAW + Small Fine JPEG",
+    "mRAW + Small Normal JPEG",
+    "mRAW + Smaller JPEG",
+    "mRAW + Tiny JPEG",
+    "sRAW + Large Fine JPEG",
+    "sRAW + Large Normal JPEG",
+    "sRAW + Medium Fine JPEG",
+    "sRAW + Medium Normal JPEG",
+    "sRAW + Small Fine JPEG",
+    "sRAW + Small Normal JPEG",
+    "sRAW + Smaller JPEG",
+    "sRAW + Tiny JPEG",
+    "RAW",
+    "mRAW",
+    "sRAW",
+];
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CaptureDslrImageRequest {
+    shutterspeed: u8,
+    iso: u8,
+    aperture: u8,
+    imageformat: u8,
+    request_id: String,
+}
+
+impl ZMessage for CaptureDslrImageRequest {
+    type Serdes = SerdeCdrSerdes<Self>;
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CaptureDslrImageResponse {
+    accepted: bool,
+    request_id: String,
+    shutterspeed: u8,
+    shutterspeed_label: String,
+    iso: u8,
+    iso_label: String,
+    aperture: u8,
+    aperture_label: String,
+    imageformat: u8,
+    imageformat_label: String,
+    status: String,
+}
+
+impl ZMessage for CaptureDslrImageResponse {
+    type Serdes = SerdeCdrSerdes<Self>;
+}
+
+struct CaptureDslrImage;
+
+impl ServiceTypeInfo for CaptureDslrImage {
+    fn service_type_info() -> TypeInfo {
+        TypeInfo::new(
+            "pgwaam_msgs::srv::dds_::CaptureDslrImage_",
+            TypeHash::zero(),
+        )
+    }
+}
+
+impl ZService for CaptureDslrImage {
+    type Request = CaptureDslrImageRequest;
+    type Response = CaptureDslrImageResponse;
+}
+
+#[derive(Debug, Clone)]
+struct DslrIdentity {
+    hostname: String,
+    dslr_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct DslrTopics {
+    service: String,
+    image_cr2: String,
+    image_jpg: String,
+}
+
+#[derive(Debug, Clone)]
+struct CameraPath {
+    folder: String,
+    name: String,
+}
+
+#[derive(Debug)]
+struct DslrCaptureFiles {
+    cr2_path: PathBuf,
+    jpg_path: PathBuf,
+    cr2_bytes: Vec<u8>,
+    jpg_bytes: Vec<u8>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,6 +183,12 @@ async fn main() -> Result<()> {
             let message = args.next().unwrap_or_else(chirp_message);
             publish_chatter(message).await
         }
+        "dslr-service" => run_dslr_service(false).await,
+        "dslr-service-once" => run_dslr_service(true).await,
+        "dslr-capture-request" => {
+            let request = parse_capture_request(args.collect())?;
+            request_dslr_capture(request).await
+        }
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())
@@ -59,6 +207,10 @@ fn print_help() {
     println!("  cargo run -- source");
     println!("  cargo run -- chatter-listen [timeout-seconds]");
     println!("  cargo run -- chatter-publish [message]");
+    println!("  cargo run -- dslr-service | dslr-service-once");
+    println!(
+        "  cargo run -- dslr-capture-request [shutterspeed-index] [iso-index] [aperture-index] [imageformat-index] [request-id]"
+    );
 }
 
 fn doctor() -> Result<()> {
@@ -181,6 +333,521 @@ async fn publish_chatter(message: String) -> Result<()> {
 
     println!("CHATTER_PUBLISH_GREEN data={:?}", msg.data);
     Ok(())
+}
+
+async fn run_dslr_service(once: bool) -> Result<()> {
+    let identity = dslr_identity()?;
+    let topics = dslr_topics(&identity);
+    let ctx = ZContextBuilder::default()
+        .build()
+        .map_err(|e| anyhow!("build hiroz context: {e}"))?;
+    let node = ctx
+        .create_node(DSLR_NODE_NAME)
+        .build()
+        .map_err(|e| anyhow!("create Hiroz DSLR node: {e}"))?;
+    let mut service = node
+        .create_service::<CaptureDslrImage>(&topics.service)
+        .build()
+        .map_err(|e| anyhow!("create DSLR capture service {}: {e}", topics.service))?;
+
+    println!("DSLR_SERVICE_READY service={}", topics.service);
+    println!("DSLR_TOPIC_CR2 topic={}", topics.image_cr2);
+    println!("DSLR_TOPIC_JPG topic={}", topics.image_jpg);
+
+    loop {
+        let request = service
+            .async_take_request()
+            .await
+            .map_err(|e| anyhow!("take DSLR capture request: {e}"))?;
+        let message = request.message().clone();
+        let response = capture_ack(&message);
+
+        request
+            .reply(&response)
+            .await
+            .map_err(|e| anyhow!("reply to DSLR capture request: {e}"))?;
+        println!(
+            "DSLR_ACK_GREEN request_id={} shutterspeed={} iso={} aperture={} imageformat={}",
+            response.request_id,
+            response.shutterspeed_label,
+            response.iso_label,
+            response.aperture_label,
+            response.imageformat_label
+        );
+
+        if response.accepted {
+            match capture_dslr_pair(&message, &identity) {
+                Ok(files) => {
+                    publish_dslr_images(&topics, &identity, files).await?;
+                }
+                Err(err) => {
+                    println!(
+                        "DSLR_CAPTURE_RED request_id={} error={err:#}",
+                        response.request_id
+                    );
+                    return Err(err);
+                }
+            }
+        }
+
+        if once {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+async fn request_dslr_capture(request: CaptureDslrImageRequest) -> Result<()> {
+    let identity = dslr_identity()?;
+    let topics = dslr_topics(&identity);
+    let ctx = ZContextBuilder::default()
+        .build()
+        .map_err(|e| anyhow!("build hiroz context: {e}"))?;
+    let node = ctx
+        .create_node("gphoto2_rs_dslr_capture_client")
+        .build()
+        .map_err(|e| anyhow!("create Hiroz DSLR client node: {e}"))?;
+    let client = node
+        .create_client::<CaptureDslrImage>(&topics.service)
+        .build()
+        .map_err(|e| anyhow!("create DSLR capture client {}: {e}", topics.service))?;
+
+    println!(
+        "DSLR_REQUEST service={} request_id={} shutterspeed={} iso={} aperture={} imageformat={}",
+        topics.service,
+        request.request_id,
+        request.shutterspeed,
+        request.iso,
+        request.aperture,
+        request.imageformat
+    );
+
+    let response = client
+        .call_with_timeout(&request, Duration::from_secs(DEFAULT_SERVICE_TIMEOUT_SECS))
+        .await
+        .map_err(|e| anyhow!("call DSLR capture service {}: {e}", topics.service))?;
+
+    println!(
+        "DSLR_ACK_RECEIVED_GREEN accepted={} request_id={} shutterspeed={} iso={} aperture={} imageformat={} status={}",
+        response.accepted,
+        response.request_id,
+        response.shutterspeed_label,
+        response.iso_label,
+        response.aperture_label,
+        response.imageformat_label,
+        response.status
+    );
+    Ok(())
+}
+
+fn parse_capture_request(args: Vec<String>) -> Result<CaptureDslrImageRequest> {
+    let shutterspeed = parse_index_arg(
+        &args,
+        0,
+        DEFAULT_SHUTTERSPEED,
+        SHUTTERSPEEDS,
+        "shutterspeed",
+    )?;
+    let iso = parse_index_arg(&args, 1, DEFAULT_ISO, ISOS, "iso")?;
+    let aperture = parse_index_arg(&args, 2, DEFAULT_APERTURE, APERTURES, "aperture")?;
+    let imageformat = parse_index_arg(&args, 3, DEFAULT_IMAGEFORMAT, IMAGEFORMATS, "imageformat")?;
+    let request_id = args.get(4).cloned().unwrap_or_else(default_request_id);
+
+    Ok(CaptureDslrImageRequest {
+        shutterspeed,
+        iso,
+        aperture,
+        imageformat,
+        request_id,
+    })
+}
+
+fn parse_index_arg(
+    args: &[String],
+    arg_index: usize,
+    default: u8,
+    values: &[&str],
+    name: &str,
+) -> Result<u8> {
+    let value = match args.get(arg_index) {
+        Some(s) => s
+            .parse::<u8>()
+            .with_context(|| format!("parse {name} index from '{s}'"))?,
+        None => default,
+    };
+    enum_label(values, value, name)?;
+    Ok(value)
+}
+
+fn capture_ack(request: &CaptureDslrImageRequest) -> CaptureDslrImageResponse {
+    let request_id = if request.request_id.trim().is_empty() {
+        default_request_id()
+    } else {
+        request.request_id.clone()
+    };
+
+    let status =
+        "ACK capture accepted; capture and Hiroz image publication will continue".to_string();
+
+    CaptureDslrImageResponse {
+        accepted: true,
+        request_id,
+        shutterspeed: request.shutterspeed,
+        shutterspeed_label: enum_label(SHUTTERSPEEDS, request.shutterspeed, "shutterspeed")
+            .unwrap_or("invalid")
+            .to_string(),
+        iso: request.iso,
+        iso_label: enum_label(ISOS, request.iso, "iso")
+            .unwrap_or("invalid")
+            .to_string(),
+        aperture: request.aperture,
+        aperture_label: enum_label(APERTURES, request.aperture, "aperture")
+            .unwrap_or("invalid")
+            .to_string(),
+        imageformat: request.imageformat,
+        imageformat_label: enum_label(IMAGEFORMATS, request.imageformat, "imageformat")
+            .unwrap_or("invalid")
+            .to_string(),
+        status,
+    }
+}
+
+fn capture_dslr_pair(
+    request: &CaptureDslrImageRequest,
+    identity: &DslrIdentity,
+) -> Result<DslrCaptureFiles> {
+    let request_id = if request.request_id.trim().is_empty() {
+        default_request_id()
+    } else {
+        request.request_id.clone()
+    };
+    let output_dir = PathBuf::from(DEFAULT_CAPTURE_DIR).join(&request_id);
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("create capture directory {}", output_dir.display()))?;
+
+    let context = GPhotoContext::new().context("create gphoto2 context")?;
+    let camera = context
+        .autodetect_camera()
+        .wait()
+        .context("autodetect camera; is the Canon EOS 6D attached and unclaimed?")?;
+
+    let actual_shutter = set_radio_choice_by_index(
+        &camera,
+        &["shutterspeed"],
+        request.shutterspeed,
+        SHUTTERSPEEDS,
+        "shutterspeed",
+    )?;
+    let actual_iso = set_radio_choice_by_index(&camera, &["iso"], request.iso, ISOS, "iso")?;
+    let actual_aperture = set_radio_choice_by_index(
+        &camera,
+        &["aperture", "f-number"],
+        request.aperture,
+        APERTURES,
+        "aperture",
+    )?;
+    let actual_format = set_radio_choice_by_index(
+        &camera,
+        &["imageformat", "imageformatsd", "imageformatcf"],
+        request.imageformat,
+        IMAGEFORMATS,
+        "imageformat",
+    )?;
+
+    println!(
+        "DSLR_CAMERA_CONFIG_GREEN shutterspeed={} iso={} aperture={} imageformat={}",
+        actual_shutter, actual_iso, actual_aperture, actual_format
+    );
+
+    let first = camera.capture_image().wait().context("capture image")?;
+    let mut camera_paths = vec![CameraPath::from_gphoto(&first)];
+    let started = Instant::now();
+    let mut saw_complete = false;
+
+    while started.elapsed() < Duration::from_secs(15) {
+        match camera
+            .wait_event(Duration::from_millis(1000))
+            .wait()
+            .context("wait for camera file events")?
+        {
+            CameraEvent::NewFile(file) => camera_paths.push(CameraPath::from_gphoto(&file)),
+            CameraEvent::CaptureComplete => {
+                saw_complete = true;
+                if camera_paths.len() >= 2 {
+                    break;
+                }
+            }
+            CameraEvent::Timeout if saw_complete || camera_paths.len() >= 2 => break,
+            CameraEvent::Timeout => {}
+            other => println!("DSLR_CAMERA_EVENT event={other:?}"),
+        }
+    }
+
+    camera_paths.sort_by(|a, b| a.name.cmp(&b.name).then(a.folder.cmp(&b.folder)));
+    camera_paths.dedup_by(|a, b| a.folder == b.folder && a.name == b.name);
+
+    let mut cr2_path = None;
+    let mut jpg_path = None;
+    for camera_path in camera_paths {
+        let local_path = output_dir.join(&camera_path.name);
+        camera
+            .fs()
+            .download_to(&camera_path.folder, &camera_path.name, &local_path)
+            .wait()
+            .with_context(|| {
+                format!(
+                    "download camera file {}/{} to {}",
+                    camera_path.folder,
+                    camera_path.name,
+                    local_path.display()
+                )
+            })?;
+        println!(
+            "DSLR_DOWNLOAD_GREEN file={} path={}",
+            camera_path.name,
+            local_path.display()
+        );
+
+        match extension_lower(&local_path).as_deref() {
+            Some("cr2") => cr2_path = Some(local_path),
+            Some("jpg") | Some("jpeg") => jpg_path = Some(local_path),
+            _ => {}
+        }
+    }
+
+    let cr2_path = cr2_path.ok_or_else(|| anyhow!("capture did not produce a .cr2 file"))?;
+    let jpg_path = jpg_path.ok_or_else(|| anyhow!("capture did not produce a .jpg file"))?;
+    let cr2_bytes = fs::read(&cr2_path).with_context(|| format!("read {}", cr2_path.display()))?;
+    let jpg_bytes = fs::read(&jpg_path).with_context(|| format!("read {}", jpg_path.display()))?;
+
+    if cr2_bytes.is_empty() {
+        bail!("downloaded CR2 is empty: {}", cr2_path.display());
+    }
+    if jpg_bytes.is_empty() {
+        bail!("downloaded JPEG is empty: {}", jpg_path.display());
+    }
+
+    println!(
+        "DSLR_CAPTURE_GREEN camera={} cr2_bytes={} jpg_bytes={} cr2_path={} jpg_path={}",
+        identity.dslr_name,
+        cr2_bytes.len(),
+        jpg_bytes.len(),
+        cr2_path.display(),
+        jpg_path.display()
+    );
+
+    Ok(DslrCaptureFiles {
+        cr2_path,
+        jpg_path,
+        cr2_bytes,
+        jpg_bytes,
+    })
+}
+
+async fn publish_dslr_images(
+    topics: &DslrTopics,
+    identity: &DslrIdentity,
+    files: DslrCaptureFiles,
+) -> Result<()> {
+    let ctx = ZContextBuilder::default()
+        .build()
+        .map_err(|e| anyhow!("build hiroz context for image publish: {e}"))?;
+    let node = ctx
+        .create_node("gphoto2_rs_dslr_image_publisher")
+        .build()
+        .map_err(|e| anyhow!("create Hiroz image publisher node: {e}"))?;
+    let cr2_pub = node
+        .create_pub::<ByteMultiArray>(&topics.image_cr2)
+        .build()
+        .map_err(|e| anyhow!("create CR2 publisher {}: {e}", topics.image_cr2))?;
+    let jpg_pub = node
+        .create_pub::<CompressedImage>(&topics.image_jpg)
+        .build()
+        .map_err(|e| anyhow!("create JPEG publisher {}: {e}", topics.image_jpg))?;
+
+    let cr2_len = files.cr2_bytes.len();
+    let jpg_len = files.jpg_bytes.len();
+    let cr2_msg = ByteMultiArray {
+        layout: MultiArrayLayout {
+            dim: Vec::new(),
+            data_offset: 0,
+        },
+        data: ZBuf::from(files.cr2_bytes),
+    };
+    let jpg_msg = CompressedImage {
+        header: Header {
+            stamp: ros_time_now(),
+            frame_id: format!("{}/{}/optical_frame", identity.hostname, identity.dslr_name),
+        },
+        format: "jpeg".to_string(),
+        data: ZBuf::from(files.jpg_bytes),
+    };
+
+    cr2_pub
+        .async_publish(&cr2_msg)
+        .await
+        .map_err(|e| anyhow!("publish CR2 image to {}: {e}", topics.image_cr2))?;
+    println!(
+        "DSLR_PUBLISH_CR2_GREEN topic={} bytes={} source={}",
+        topics.image_cr2,
+        cr2_len,
+        files.cr2_path.display()
+    );
+
+    jpg_pub
+        .async_publish(&jpg_msg)
+        .await
+        .map_err(|e| anyhow!("publish JPEG image to {}: {e}", topics.image_jpg))?;
+    println!(
+        "DSLR_PUBLISH_JPG_GREEN topic={} bytes={} source={}",
+        topics.image_jpg,
+        jpg_len,
+        files.jpg_path.display()
+    );
+
+    Ok(())
+}
+
+impl CameraPath {
+    fn from_gphoto(path: &gphoto2::file::CameraFilePath) -> Self {
+        Self {
+            folder: path.folder().into_owned(),
+            name: path.name().into_owned(),
+        }
+    }
+}
+
+fn dslr_identity() -> Result<DslrIdentity> {
+    let hostname = run_text("hostname", &[])?.trim().to_string();
+    let detected = run_text("gphoto2", &["--auto-detect"])?;
+    let dslr_model = detected
+        .lines()
+        .find_map(|line| {
+            if line.contains("usb:") && !line.starts_with("Model") {
+                line.split("usb:")
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            }
+        })
+        .unwrap_or("Canon EOS 6D");
+
+    Ok(DslrIdentity {
+        hostname: sanitize_topic_segment(&hostname),
+        dslr_name: sanitize_topic_segment(dslr_model),
+    })
+}
+
+fn dslr_topics(identity: &DslrIdentity) -> DslrTopics {
+    let base = format!("/pgwaam/{}/{}", identity.hostname, identity.dslr_name);
+    DslrTopics {
+        service: format!("{base}/capture"),
+        image_cr2: format!("{base}/image_cr2"),
+        image_jpg: format!("{base}/image_jpg"),
+    }
+}
+
+fn sanitize_topic_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn enum_label<'a>(values: &'a [&str], index: u8, name: &str) -> Result<&'a str> {
+    values.get(index as usize).copied().ok_or_else(|| {
+        anyhow!(
+            "{name} enum index {index} is out of range 0..{}",
+            values.len() - 1
+        )
+    })
+}
+
+fn set_radio_choice_by_index(
+    camera: &gphoto2::Camera,
+    keys: &[&str],
+    index: u8,
+    expected_values: &[&str],
+    label: &str,
+) -> Result<String> {
+    let expected = enum_label(expected_values, index, label)?;
+
+    for key in keys {
+        let Ok(widget) = camera.config_key::<RadioWidget>(key).wait() else {
+            continue;
+        };
+        let choices = widget.choices_iter().collect::<Vec<_>>();
+        let choice = choices
+            .get(index as usize)
+            .cloned()
+            .or_else(|| {
+                let normalized_expected = normalize_choice(expected);
+                choices
+                    .iter()
+                    .find(|choice| normalize_choice(choice) == normalized_expected)
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "{label} index {index} ({expected}) is not available in camera config key {key}; choices={choices:?}"
+                )
+            })?;
+
+        widget
+            .set_choice(&choice)
+            .with_context(|| format!("set {key} to {choice}"))?;
+        camera
+            .set_config(&widget)
+            .wait()
+            .with_context(|| format!("apply {key}"))?;
+        return Ok(choice);
+    }
+
+    bail!("no camera config key found for {label}: tried {keys:?}");
+}
+
+fn normalize_choice(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn extension_lower(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+}
+
+fn ros_time_now() -> RosTime {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    RosTime {
+        sec: now.as_secs().min(i32::MAX as u64) as i32,
+        nanosec: now.subsec_nanos(),
+    }
+}
+
+fn default_request_id() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    format!("dslr-{now}")
 }
 
 fn parse_timeout(s: &str) -> Result<Duration> {

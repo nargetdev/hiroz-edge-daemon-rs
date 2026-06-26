@@ -1,0 +1,208 @@
+# DSLR capture service manifest
+
+This goal runs from the Raspberry Pi itself and uses the local Canon EOS 6D over USB plus Hiroz over the configured Zenoh client session:
+
+```sh
+export ZENOH_CONFIG_OVERRIDE='mode="client";connect/endpoints=["tcp/172.31.1.252:7447"]'
+```
+
+The preliminary service endpoint is:
+
+```text
+/pgwaam/{rpi_hostname}/{dslr_name}/capture
+```
+
+For this Pi and camera, that resolves to:
+
+```text
+/pgwaam/id2-rpi4/Canon_EOS_6D/capture
+```
+
+A service call returns an ACK containing the selected enum values and labels before the camera work begins. After capture and download, two Hiroz topics are published:
+
+```text
+/pgwaam/{rpi_hostname}/{dslr_name}/image_cr2
+/pgwaam/{rpi_hostname}/{dslr_name}/image_jpg
+```
+
+For this Pi and camera:
+
+```text
+/pgwaam/id2-rpi4/Canon_EOS_6D/image_cr2
+/pgwaam/id2-rpi4/Canon_EOS_6D/image_jpg
+```
+
+The CR2 topic uses `std_msgs/msg/ByteMultiArray`; its `data` field is the byte-for-byte original `.cr2` file downloaded from the camera. The JPG topic uses `sensor_msgs/msg/CompressedImage` with `format: "jpeg"` and the downloaded JPEG bytes in `data`.
+
+## Service definition
+
+```srv
+# pgwaam_msgs/srv/CaptureDslrImage.srv
+
+# shutterspeed enum, seconds; 1/x are fractions
+uint8 SHUTTERSPEED_30=0
+uint8 SHUTTERSPEED_25=1
+uint8 SHUTTERSPEED_20=2
+uint8 SHUTTERSPEED_15=3
+uint8 SHUTTERSPEED_13=4
+uint8 SHUTTERSPEED_10_3=5
+uint8 SHUTTERSPEED_8=6
+uint8 SHUTTERSPEED_6_3=7
+uint8 SHUTTERSPEED_5=8
+uint8 SHUTTERSPEED_4=9
+uint8 SHUTTERSPEED_3_2=10
+uint8 SHUTTERSPEED_2_5=11
+uint8 SHUTTERSPEED_2=12
+uint8 SHUTTERSPEED_1_6=13
+uint8 SHUTTERSPEED_1_3=14
+uint8 SHUTTERSPEED_1=15
+uint8 SHUTTERSPEED_0_8=16
+uint8 SHUTTERSPEED_0_6=17
+uint8 SHUTTERSPEED_0_5=18
+uint8 SHUTTERSPEED_0_4=19
+uint8 SHUTTERSPEED_0_3=20
+uint8 SHUTTERSPEED_1_4=21
+uint8 SHUTTERSPEED_1_5=22
+uint8 SHUTTERSPEED_1_6_FRAC=23
+uint8 SHUTTERSPEED_1_8=24
+uint8 SHUTTERSPEED_1_10=25
+uint8 SHUTTERSPEED_1_13=26
+uint8 SHUTTERSPEED_1_15=27
+uint8 SHUTTERSPEED_1_20=28
+uint8 SHUTTERSPEED_1_25=29
+uint8 SHUTTERSPEED_1_30=30
+uint8 SHUTTERSPEED_1_40=31
+uint8 SHUTTERSPEED_1_50=32
+uint8 SHUTTERSPEED_1_60=33
+uint8 SHUTTERSPEED_1_80=34
+uint8 SHUTTERSPEED_1_100=35
+uint8 SHUTTERSPEED_1_125=36
+uint8 SHUTTERSPEED_1_160=37
+uint8 SHUTTERSPEED_1_200=38
+uint8 SHUTTERSPEED_1_250=39
+uint8 SHUTTERSPEED_1_320=40
+uint8 SHUTTERSPEED_1_400=41
+uint8 SHUTTERSPEED_1_500=42
+uint8 SHUTTERSPEED_1_640=43
+uint8 SHUTTERSPEED_1_800=44
+uint8 SHUTTERSPEED_1_1000=45
+uint8 SHUTTERSPEED_1_1250=46
+uint8 SHUTTERSPEED_1_1600=47
+uint8 SHUTTERSPEED_1_2000=48
+uint8 SHUTTERSPEED_1_2500=49
+uint8 SHUTTERSPEED_1_3200=50
+uint8 SHUTTERSPEED_1_4000=51
+
+# ISO enum
+uint8 ISO_AUTO=0
+uint8 ISO_100=1
+uint8 ISO_125=2
+uint8 ISO_160=3
+uint8 ISO_200=4
+uint8 ISO_250=5
+uint8 ISO_320=6
+uint8 ISO_400=7
+uint8 ISO_500=8
+uint8 ISO_640=9
+uint8 ISO_800=10
+uint8 ISO_1000=11
+uint8 ISO_1250=12
+uint8 ISO_1600=13
+uint8 ISO_2000=14
+uint8 ISO_2500=15
+uint8 ISO_3200=16
+uint8 ISO_4000=17
+uint8 ISO_5000=18
+uint8 ISO_6400=19
+
+# aperture enum, f-number
+uint8 APERTURE_2_8=0
+uint8 APERTURE_3_2=1
+uint8 APERTURE_3_5=2
+uint8 APERTURE_4=3
+uint8 APERTURE_4_5=4
+uint8 APERTURE_5=5
+uint8 APERTURE_5_6=6
+uint8 APERTURE_6_3=7
+uint8 APERTURE_7_1=8
+uint8 APERTURE_8=9
+uint8 APERTURE_9=10
+uint8 APERTURE_10=11
+uint8 APERTURE_11=12
+uint8 APERTURE_13=13
+uint8 APERTURE_14=14
+uint8 APERTURE_16=15
+uint8 APERTURE_18=16
+uint8 APERTURE_20=17
+uint8 APERTURE_22=18
+uint8 APERTURE_25=19
+uint8 APERTURE_29=20
+uint8 APERTURE_32=21
+
+# imageformat enum
+uint8 IMAGEFORMAT_LARGE_FINE_JPEG=0
+uint8 IMAGEFORMAT_LARGE_NORMAL_JPEG=1
+uint8 IMAGEFORMAT_MEDIUM_FINE_JPEG=2
+uint8 IMAGEFORMAT_MEDIUM_NORMAL_JPEG=3
+uint8 IMAGEFORMAT_SMALL_FINE_JPEG=4
+uint8 IMAGEFORMAT_SMALL_NORMAL_JPEG=5
+uint8 IMAGEFORMAT_SMALLER_JPEG=6
+uint8 IMAGEFORMAT_TINY_JPEG=7
+uint8 IMAGEFORMAT_RAW_LARGE_FINE_JPEG=8
+uint8 IMAGEFORMAT_RAW_LARGE_NORMAL_JPEG=9
+uint8 IMAGEFORMAT_RAW_MEDIUM_FINE_JPEG=10
+uint8 IMAGEFORMAT_RAW_MEDIUM_NORMAL_JPEG=11
+uint8 IMAGEFORMAT_RAW_SMALL_FINE_JPEG=12
+uint8 IMAGEFORMAT_RAW_SMALL_NORMAL_JPEG=13
+uint8 IMAGEFORMAT_RAW_SMALLER_JPEG=14
+uint8 IMAGEFORMAT_RAW_TINY_JPEG=15
+uint8 IMAGEFORMAT_MRAW_LARGE_FINE_JPEG=16
+uint8 IMAGEFORMAT_MRAW_LARGE_NORMAL_JPEG=17
+uint8 IMAGEFORMAT_MRAW_MEDIUM_FINE_JPEG=18
+uint8 IMAGEFORMAT_MRAW_MEDIUM_NORMAL_JPEG=19
+uint8 IMAGEFORMAT_MRAW_SMALL_FINE_JPEG=20
+uint8 IMAGEFORMAT_MRAW_SMALL_NORMAL_JPEG=21
+uint8 IMAGEFORMAT_MRAW_SMALLER_JPEG=22
+uint8 IMAGEFORMAT_MRAW_TINY_JPEG=23
+uint8 IMAGEFORMAT_SRAW_LARGE_FINE_JPEG=24
+uint8 IMAGEFORMAT_SRAW_LARGE_NORMAL_JPEG=25
+uint8 IMAGEFORMAT_SRAW_MEDIUM_FINE_JPEG=26
+uint8 IMAGEFORMAT_SRAW_MEDIUM_NORMAL_JPEG=27
+uint8 IMAGEFORMAT_SRAW_SMALL_FINE_JPEG=28
+uint8 IMAGEFORMAT_SRAW_SMALL_NORMAL_JPEG=29
+uint8 IMAGEFORMAT_SRAW_SMALLER_JPEG=30
+uint8 IMAGEFORMAT_SRAW_TINY_JPEG=31
+uint8 IMAGEFORMAT_RAW=32
+uint8 IMAGEFORMAT_MRAW=33
+uint8 IMAGEFORMAT_SRAW=34
+
+uint8 shutterspeed
+uint8 iso
+uint8 aperture
+uint8 imageformat
+string request_id
+---
+bool accepted
+string request_id
+uint8 shutterspeed
+string shutterspeed_label
+uint8 iso
+string iso_label
+uint8 aperture
+string aperture_label
+uint8 imageformat
+string imageformat_label
+string status
+```
+
+## CompressedImage reference
+
+The JPG topic uses `sensor_msgs/msg/CompressedImage`:
+
+```msg
+Header header
+string format
+uint8[] data
+```
+
+For this goal, `format` is `jpeg`, `header.stamp` is the publish time, `header.frame_id` is `{rpi_hostname}/{dslr_name}/optical_frame`, and `data` is the downloaded JPEG file bytes.

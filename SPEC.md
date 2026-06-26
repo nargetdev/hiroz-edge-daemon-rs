@@ -64,3 +64,9 @@ like:
 ```text
 CHIRP CHIRP! From gphoto2-rs :: `datetime`
 ```
+
+# DSLR capture service #
+
+Detailed service and image publishing requirements live in [SPEC_dslr_svc.md](SPEC_dslr_svc.md).
+
+🤔{✅/❌} a ROS2 service definition requests a capture with basic params exposed as enum selections and quickly ACKs the selected params; after gphoto2 capture the CR2 bytes and JPEG `sensor_msgs/CompressedImage` are published via Hiroz
