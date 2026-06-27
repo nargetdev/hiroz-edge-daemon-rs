@@ -8,6 +8,7 @@ use gphoto2::{camera::CameraEvent, widget::RadioWidget, Context as GPhotoContext
 use hiroz::{
     context::ZContextBuilder,
     msg::{SerdeCdrSerdes, ZMessage, ZService},
+    pubsub::ZPub,
     Builder, ServiceTypeInfo, TypeHash, TypeInfo, ZBuf,
 };
 use hiroz_msgs::{
@@ -18,8 +19,11 @@ use hiroz_msgs::{
 
 const DEFAULT_CAPTURE_DIR: &str = "captures";
 const CHATTER_TOPIC: &str = "/chatter";
+const DEFAULT_ZENOH_ENDPOINT: &str = "tcp/172.31.1.252:7447";
 const DEFAULT_CHATTER_TIMEOUT_SECS: u64 = 15;
 const DEFAULT_SERVICE_TIMEOUT_SECS: u64 = 10;
+const DSLR_STATUS_HEARTBEAT_SECS: u64 = 5;
+const COMPRESSED_IMAGE_FORMAT: &str = "bgr8; jpeg compressed bgr8";
 const DEFAULT_SHUTTERSPEED: u8 = 30;
 const DEFAULT_ISO: u8 = 7;
 const DEFAULT_APERTURE: u8 = 9;
@@ -138,6 +142,29 @@ struct DslrTopics {
     service: String,
     image_cr2: String,
     image_jpg: String,
+    status: String,
+}
+
+type Cr2Publisher = ZPub<ByteMultiArray, <ByteMultiArray as ZMessage>::Serdes>;
+type JpgPublisher = ZPub<CompressedImage, <CompressedImage as ZMessage>::Serdes>;
+type StatusPublisher = ZPub<RosString, <RosString as ZMessage>::Serdes>;
+
+#[derive(Debug)]
+struct DslrPublishers {
+    image_cr2: Cr2Publisher,
+    image_jpg: JpgPublisher,
+    status: StatusPublisher,
+}
+
+#[derive(Debug, Clone)]
+struct DslrServiceStatus {
+    state: &'static str,
+    last_request_id: Option<String>,
+    last_capture_unix_ns: Option<u128>,
+    last_cr2_bytes: Option<usize>,
+    last_jpg_bytes: Option<usize>,
+    image_cr2_topic: String,
+    image_jpg_topic: String,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +266,21 @@ fn doctor() -> Result<()> {
     Ok(())
 }
 
+fn zenoh_context_builder() -> ZContextBuilder {
+    match std::env::var("ZENOH_CONFIG_OVERRIDE") {
+        Ok(value) => {
+            println!("ZENOH_CONFIG_GREEN source=env override={value:?}");
+            ZContextBuilder::default()
+        }
+        Err(_) => {
+            println!("ZENOH_CONFIG_GREEN source=builtin mode=client endpoint={DEFAULT_ZENOH_ENDPOINT}");
+            ZContextBuilder::default()
+                .with_json("mode", "client")
+                .with_json("connect/endpoints", [DEFAULT_ZENOH_ENDPOINT])
+        }
+    }
+}
+
 fn capture_one(output: Option<&Path>) -> Result<PathBuf> {
     let output = match output {
         Some(path) => path.to_path_buf(),
@@ -285,7 +327,7 @@ fn capture_one(output: Option<&Path>) -> Result<PathBuf> {
 }
 
 async fn listen_chatter(timeout: Duration) -> Result<()> {
-    let ctx = ZContextBuilder::default()
+    let ctx = zenoh_context_builder()
         .build()
         .map_err(|e| anyhow!("build hiroz context: {e}"))?;
     let node = ctx
@@ -313,7 +355,7 @@ async fn listen_chatter(timeout: Duration) -> Result<()> {
 }
 
 async fn publish_chatter(message: String) -> Result<()> {
-    let ctx = ZContextBuilder::default()
+    let ctx = zenoh_context_builder()
         .build()
         .map_err(|e| anyhow!("build hiroz context: {e}"))?;
     let node = ctx
@@ -338,7 +380,7 @@ async fn publish_chatter(message: String) -> Result<()> {
 async fn run_dslr_service(once: bool) -> Result<()> {
     let identity = dslr_identity()?;
     let topics = dslr_topics(&identity);
-    let ctx = ZContextBuilder::default()
+    let ctx = zenoh_context_builder()
         .build()
         .map_err(|e| anyhow!("build hiroz context: {e}"))?;
     let node = ctx
@@ -349,16 +391,38 @@ async fn run_dslr_service(once: bool) -> Result<()> {
         .create_service::<CaptureDslrImage>(&topics.service)
         .build()
         .map_err(|e| anyhow!("create DSLR capture service {}: {e}", topics.service))?;
+    let publishers = DslrPublishers {
+        image_cr2: node
+            .create_pub::<ByteMultiArray>(&topics.image_cr2)
+            .build()
+            .map_err(|e| anyhow!("create CR2 publisher {}: {e}", topics.image_cr2))?,
+        image_jpg: node
+            .create_pub::<CompressedImage>(&topics.image_jpg)
+            .build()
+            .map_err(|e| anyhow!("create JPEG publisher {}: {e}", topics.image_jpg))?,
+        status: node
+            .create_pub::<RosString>(&topics.status)
+            .build()
+            .map_err(|e| anyhow!("create status publisher {}: {e}", topics.status))?,
+    };
+    let mut status = DslrServiceStatus::new(&topics);
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(DSLR_STATUS_HEARTBEAT_SECS));
 
     println!("DSLR_SERVICE_READY service={}", topics.service);
     println!("DSLR_TOPIC_CR2 topic={}", topics.image_cr2);
     println!("DSLR_TOPIC_JPG topic={}", topics.image_jpg);
+    println!("DSLR_TOPIC_STATUS topic={}", topics.status);
 
     loop {
-        let request = service
-            .async_take_request()
-            .await
-            .map_err(|e| anyhow!("take DSLR capture request: {e}"))?;
+        let request = tokio::select! {
+            _ = heartbeat.tick() => {
+                publish_dslr_status(&publishers.status, &status).await?;
+                continue;
+            }
+            request = service.async_take_request() => {
+                request.map_err(|e| anyhow!("take DSLR capture request: {e}"))?
+            }
+        };
         let message = request.message().clone();
         let response = capture_ack(&message);
 
@@ -374,13 +438,21 @@ async fn run_dslr_service(once: bool) -> Result<()> {
             response.aperture_label,
             response.imageformat_label
         );
+        status.mark_capturing(&response.request_id);
+        publish_dslr_status(&publishers.status, &status).await?;
 
         if response.accepted {
             match capture_dslr_pair(&message, &identity) {
                 Ok(files) => {
-                    publish_dslr_images(&topics, &identity, files).await?;
+                    let cr2_len = files.cr2_bytes.len();
+                    let jpg_len = files.jpg_bytes.len();
+                    publish_dslr_images(&publishers, &topics, &identity, files).await?;
+                    status.mark_idle_after_capture(cr2_len, jpg_len);
+                    publish_dslr_status(&publishers.status, &status).await?;
                 }
                 Err(err) => {
+                    status.mark_error();
+                    let _ = publish_dslr_status(&publishers.status, &status).await;
                     println!(
                         "DSLR_CAPTURE_RED request_id={} error={err:#}",
                         response.request_id
@@ -401,7 +473,7 @@ async fn run_dslr_service(once: bool) -> Result<()> {
 async fn request_dslr_capture(request: CaptureDslrImageRequest) -> Result<()> {
     let identity = dslr_identity()?;
     let topics = dslr_topics(&identity);
-    let ctx = ZContextBuilder::default()
+    let ctx = zenoh_context_builder()
         .build()
         .map_err(|e| anyhow!("build hiroz context: {e}"))?;
     let node = ctx
@@ -587,10 +659,16 @@ fn capture_dslr_pair(
     camera_paths.sort_by(|a, b| a.name.cmp(&b.name).then(a.folder.cmp(&b.folder)));
     camera_paths.dedup_by(|a, b| a.folder == b.folder && a.name == b.name);
 
+    let capture_stamp = capture_file_stamp();
     let mut cr2_path = None;
     let mut jpg_path = None;
-    for camera_path in camera_paths {
-        let local_path = output_dir.join(&camera_path.name);
+    for (index, camera_path) in camera_paths.into_iter().enumerate() {
+        let local_path = output_dir.join(local_capture_filename(
+            &request_id,
+            &capture_stamp,
+            index,
+            &camera_path.name,
+        ));
         camera
             .fs()
             .download_to(&camera_path.folder, &camera_path.name, &local_path)
@@ -646,26 +724,11 @@ fn capture_dslr_pair(
 }
 
 async fn publish_dslr_images(
+    publishers: &DslrPublishers,
     topics: &DslrTopics,
     identity: &DslrIdentity,
     files: DslrCaptureFiles,
 ) -> Result<()> {
-    let ctx = ZContextBuilder::default()
-        .build()
-        .map_err(|e| anyhow!("build hiroz context for image publish: {e}"))?;
-    let node = ctx
-        .create_node("gphoto2_rs_dslr_image_publisher")
-        .build()
-        .map_err(|e| anyhow!("create Hiroz image publisher node: {e}"))?;
-    let cr2_pub = node
-        .create_pub::<ByteMultiArray>(&topics.image_cr2)
-        .build()
-        .map_err(|e| anyhow!("create CR2 publisher {}: {e}", topics.image_cr2))?;
-    let jpg_pub = node
-        .create_pub::<CompressedImage>(&topics.image_jpg)
-        .build()
-        .map_err(|e| anyhow!("create JPEG publisher {}: {e}", topics.image_jpg))?;
-
     let cr2_len = files.cr2_bytes.len();
     let jpg_len = files.jpg_bytes.len();
     let cr2_msg = ByteMultiArray {
@@ -680,11 +743,12 @@ async fn publish_dslr_images(
             stamp: ros_time_now(),
             frame_id: format!("{}/{}/optical_frame", identity.hostname, identity.dslr_name),
         },
-        format: "jpeg".to_string(),
+        format: COMPRESSED_IMAGE_FORMAT.to_string(),
         data: ZBuf::from(files.jpg_bytes),
     };
 
-    cr2_pub
+    publishers
+        .image_cr2
         .async_publish(&cr2_msg)
         .await
         .map_err(|e| anyhow!("publish CR2 image to {}: {e}", topics.image_cr2))?;
@@ -695,7 +759,8 @@ async fn publish_dslr_images(
         files.cr2_path.display()
     );
 
-    jpg_pub
+    publishers
+        .image_jpg
         .async_publish(&jpg_msg)
         .await
         .map_err(|e| anyhow!("publish JPEG image to {}: {e}", topics.image_jpg))?;
@@ -707,6 +772,70 @@ async fn publish_dslr_images(
     );
 
     Ok(())
+}
+
+async fn publish_dslr_status(
+    publisher: &StatusPublisher,
+    status: &DslrServiceStatus,
+) -> Result<()> {
+    let data = status.to_status_line();
+    let msg = RosString { data };
+    publisher
+        .async_publish(&msg)
+        .await
+        .map_err(|e| anyhow!("publish DSLR status heartbeat: {e}"))?;
+    println!("DSLR_STATUS_GREEN data={:?}", msg.data);
+    Ok(())
+}
+
+impl DslrServiceStatus {
+    fn new(topics: &DslrTopics) -> Self {
+        Self {
+            state: "idle",
+            last_request_id: None,
+            last_capture_unix_ns: None,
+            last_cr2_bytes: None,
+            last_jpg_bytes: None,
+            image_cr2_topic: topics.image_cr2.clone(),
+            image_jpg_topic: topics.image_jpg.clone(),
+        }
+    }
+
+    fn mark_capturing(&mut self, request_id: &str) {
+        self.state = "capturing";
+        self.last_request_id = Some(request_id.to_string());
+    }
+
+    fn mark_idle_after_capture(&mut self, cr2_bytes: usize, jpg_bytes: usize) {
+        self.state = "idle";
+        self.last_capture_unix_ns = Some(unix_time_ns());
+        self.last_cr2_bytes = Some(cr2_bytes);
+        self.last_jpg_bytes = Some(jpg_bytes);
+    }
+
+    fn mark_error(&mut self) {
+        self.state = "error";
+    }
+
+    fn to_status_line(&self) -> String {
+        format!(
+            "state={} heartbeat_unix_ns={} last_request_id={} last_capture_unix_ns={} last_cr2_bytes={} last_jpg_bytes={} image_cr2_topic={} image_jpg_topic={}",
+            self.state,
+            unix_time_ns(),
+            self.last_request_id.as_deref().unwrap_or(""),
+            self.last_capture_unix_ns
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            self.last_cr2_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            self.last_jpg_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            self.image_cr2_topic,
+            self.image_jpg_topic
+        )
+    }
 }
 
 impl CameraPath {
@@ -746,19 +875,21 @@ fn dslr_topics(identity: &DslrIdentity) -> DslrTopics {
     DslrTopics {
         service: format!("{base}/capture"),
         image_cr2: format!("{base}/image_cr2"),
-        image_jpg: format!("{base}/image_jpg"),
+        image_jpg: format!("{base}/image_jpg/compressed"),
+        status: format!("{base}/status"),
     }
 }
 
 fn sanitize_topic_segment(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.trim().chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
             out.push(ch);
-        } else if ch.is_whitespace() {
+        } else if !out.ends_with('_') {
             out.push('_');
         }
     }
+    let out = out.trim_matches('_').to_string();
     if out.is_empty() {
         "unknown".to_string()
     } else {
@@ -830,6 +961,59 @@ fn extension_lower(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
+}
+
+fn local_capture_filename(
+    request_id: &str,
+    capture_stamp: &str,
+    index: usize,
+    camera_filename: &str,
+) -> String {
+    let extension = Path::new(camera_filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| sanitize_filename_segment(ext).to_ascii_lowercase())
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or_else(|| "bin".to_string());
+    let remote_stem = Path::new(camera_filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(sanitize_filename_segment)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "camera-file".to_string());
+
+    format!(
+        "{}_{}_{}_{remote_stem}.{extension}",
+        sanitize_filename_segment(request_id),
+        capture_stamp,
+        index + 1
+    )
+}
+
+fn sanitize_filename_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    out.trim_matches('.').trim_matches('_').to_string()
+}
+
+fn capture_file_stamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}{:09}", now.as_secs(), now.subsec_nanos())
+}
+
+fn unix_time_ns() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
 }
 
 fn ros_time_now() -> RosTime {

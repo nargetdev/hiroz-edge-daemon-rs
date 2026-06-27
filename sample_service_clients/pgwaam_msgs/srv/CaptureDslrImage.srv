@@ -1,57 +1,4 @@
-# DSLR capture service manifest
-
-This goal runs from the Raspberry Pi itself and uses the local Canon EOS 6D over USB plus Hiroz over the configured Zenoh client session:
-
-```sh
-export ZENOH_CONFIG_OVERRIDE='mode="client";connect/endpoints=["tcp/172.31.1.252:7447"]'
-```
-
-The preliminary service endpoint is:
-
-```text
-/pgwaam/{rpi_hostname}/{dslr_name}/capture
-```
-
-For this Pi and camera, that resolves to the ROS-valid sanitized namespace:
-
-```text
-/pgwaam/id2_rpi4/Canon_EOS_6D/capture
-```
-
-A service call returns an ACK containing the selected enum values and labels before the camera work begins. After capture and download, two Hiroz topics are published:
-
-```text
-/pgwaam/{rpi_hostname}/{dslr_name}/image_cr2
-/pgwaam/{rpi_hostname}/{dslr_name}/image_jpg/compressed
-```
-
-For this Pi and camera:
-
-```text
-/pgwaam/id2_rpi4/Canon_EOS_6D/image_cr2
-/pgwaam/id2_rpi4/Canon_EOS_6D/image_jpg/compressed
-```
-
-The CR2 topic uses `std_msgs/msg/ByteMultiArray`; its `data` field is the byte-for-byte original `.cr2` file downloaded from the camera. The JPG topic is the `compressed` image_transport subtopic and uses `sensor_msgs/msg/CompressedImage` with `format: "bgr8; jpeg compressed bgr8"` and the downloaded JPEG bytes in `data`.
-
-The service also keeps a status heartbeat topic hot for graph monitors:
-
-```text
-/pgwaam/{rpi_hostname}/{dslr_name}/status
-```
-
-For this Pi and camera:
-
-```text
-/pgwaam/id2_rpi4/Canon_EOS_6D/status
-```
-
-The status heartbeat currently uses `std_msgs/msg/String` and publishes every 5 seconds while the service is alive. Its `data` field is a compact key/value line containing `state`, `heartbeat_unix_ns`, `last_request_id`, `last_capture_unix_ns`, `last_cr2_bytes`, `last_jpg_bytes`, `image_cr2_topic`, and `image_jpg_topic`. The image publishers are owned by the long-running service node so `/image_cr2` and `/image_jpg/compressed` remain advertised between captures.
-
-## Service definition
-
-```srv
-# pgwaam_msgs/srv/CaptureDslrImage.srv
+# Capture a DSLR image using camera-native enum indices.
 
 # shutterspeed enum, seconds; 1/x are fractions
 uint8 SHUTTERSPEED_30=0
@@ -207,16 +154,3 @@ string aperture_label
 uint8 imageformat
 string imageformat_label
 string status
-```
-
-## CompressedImage reference
-
-The JPG topic uses `sensor_msgs/msg/CompressedImage`:
-
-```msg
-Header header
-string format
-uint8[] data
-```
-
-For this goal, `format` is `bgr8; jpeg compressed bgr8`, `header.stamp` is the publish time, `header.frame_id` is `{rpi_hostname}/{dslr_name}/optical_frame`, and `data` is the downloaded JPEG file bytes.
