@@ -10,11 +10,6 @@ services:
       RMW_IMPLEMENTATION: rmw_zenoh_cpp
       ZENOH_CONFIG_OVERRIDE: mode="client";connect/endpoints=["tcp/172.31.1.252:7447"]
       SERVICE_NAME: /pgwaam/id2_rpi4/Canon_EOS_6D/capture
-      REQUEST_ID: docker-python-shot
-      SHUTTERSPEED: "30"
-      ISO: "7"
-      APERTURE: "9"
-      IMAGEFORMAT: "24"
     command: python3 /usr/local/bin/pgwaam_capture_client.py
 
   ros2-cli:
@@ -25,5 +20,4 @@ services:
     network_mode: host
     environment:
       <<: *ros_env
-      REQUEST_ID: docker-cli-shot
     command: /usr/local/bin/pgwaam_capture_cli.sh

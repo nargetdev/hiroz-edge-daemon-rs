@@ -40,4 +40,4 @@ RMW_IMPLEMENTATION=rmw_zenoh_cpp
 ZENOH_CONFIG_OVERRIDE='mode="client";connect/endpoints=["tcp/172.31.1.252:7447"]'
 ```
 
-Override request params with environment variables such as `REQUEST_ID`, `SHUTTERSPEED`, `ISO`, `APERTURE`, and `IMAGEFORMAT`.
+The capture service request is intentionally empty. Set camera enum indices on the running Hiroz node with ROS parameters such as `shutterspeed`, `iso`, `aperture`, and `imageformat`.

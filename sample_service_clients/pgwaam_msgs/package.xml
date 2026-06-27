@@ -3,7 +3,7 @@
   <name>pgwaam_msgs</name>
   <version>0.1.0</version>
   <description>PGWAAM DSLR capture service interfaces for ROS 2 Lyrical.</description>
-  <maintainer email="id2-rpi4@localhost">PGWAAM</maintainer>
+  <maintainer email="n@synaesthesiaflow.io">PGWAAM</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

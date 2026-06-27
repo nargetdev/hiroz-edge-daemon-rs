@@ -8,6 +8,11 @@ use gphoto2::{camera::CameraEvent, widget::RadioWidget, Context as GPhotoContext
 use hiroz::{
     context::ZContextBuilder,
     msg::{SerdeCdrSerdes, ZMessage, ZService},
+    node::ZNode,
+    parameter::{
+        IntegerRange, Parameter, ParameterDescriptor, ParameterType, ParameterValue,
+        SetParametersResult,
+    },
     pubsub::ZPub,
     Builder, ServiceTypeInfo, TypeHash, TypeInfo, ZBuf,
 };
@@ -84,13 +89,7 @@ const IMAGEFORMATS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct CaptureDslrImageRequest {
-    shutterspeed: u8,
-    iso: u8,
-    aperture: u8,
-    imageformat: u8,
-    request_id: String,
-}
+struct CaptureDslrImageRequest {}
 
 impl ZMessage for CaptureDslrImageRequest {
     type Serdes = SerdeCdrSerdes<Self>;
@@ -98,17 +97,7 @@ impl ZMessage for CaptureDslrImageRequest {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct CaptureDslrImageResponse {
-    accepted: bool,
-    request_id: String,
-    shutterspeed: u8,
-    shutterspeed_label: String,
-    iso: u8,
-    iso_label: String,
-    aperture: u8,
-    aperture_label: String,
-    imageformat: u8,
-    imageformat_label: String,
-    status: String,
+    ack_msg: String,
 }
 
 impl ZMessage for CaptureDslrImageResponse {
@@ -121,7 +110,14 @@ impl ServiceTypeInfo for CaptureDslrImage {
     fn service_type_info() -> TypeInfo {
         TypeInfo::new(
             "pgwaam_msgs::srv::dds_::CaptureDslrImage_",
-            TypeHash::zero(),
+            TypeHash::new(
+                1,
+                [
+                    0x27, 0xcd, 0x3e, 0x79, 0x62, 0x9c, 0x9d, 0x45, 0x78, 0xa4, 0x46, 0x3c,
+                    0xe9, 0x79, 0xf6, 0x54, 0xa9, 0xf9, 0x2b, 0x15, 0x0f, 0x92, 0x53, 0x7f,
+                    0x59, 0xc2, 0xf3, 0xac, 0xec, 0x7b, 0x43, 0x73,
+                ],
+            ),
         )
     }
 }
@@ -145,6 +141,14 @@ struct DslrTopics {
     status: String,
 }
 
+#[derive(Debug, Clone)]
+struct DslrCaptureSettings {
+    shutterspeed: u8,
+    iso: u8,
+    aperture: u8,
+    imageformat: u8,
+}
+
 type Cr2Publisher = ZPub<ByteMultiArray, <ByteMultiArray as ZMessage>::Serdes>;
 type JpgPublisher = ZPub<CompressedImage, <CompressedImage as ZMessage>::Serdes>;
 type StatusPublisher = ZPub<RosString, <RosString as ZMessage>::Serdes>;
@@ -159,6 +163,7 @@ struct DslrPublishers {
 #[derive(Debug, Clone)]
 struct DslrServiceStatus {
     state: &'static str,
+    settings: DslrCaptureSettings,
     last_request_id: Option<String>,
     last_capture_unix_ns: Option<u128>,
     last_cr2_bytes: Option<usize>,
@@ -377,6 +382,124 @@ async fn publish_chatter(message: String) -> Result<()> {
     Ok(())
 }
 
+fn declare_dslr_parameters(node: &ZNode) -> Result<()> {
+    declare_enum_parameter(
+        node,
+        "shutterspeed",
+        DEFAULT_SHUTTERSPEED,
+        SHUTTERSPEEDS,
+        "Canon camera shutter speed enum index",
+    )?;
+    declare_enum_parameter(
+        node,
+        "iso",
+        DEFAULT_ISO,
+        ISOS,
+        "Canon camera ISO enum index",
+    )?;
+    declare_enum_parameter(
+        node,
+        "aperture",
+        DEFAULT_APERTURE,
+        APERTURES,
+        "Canon camera aperture enum index",
+    )?;
+    declare_enum_parameter(
+        node,
+        "imageformat",
+        DEFAULT_IMAGEFORMAT,
+        IMAGEFORMATS,
+        "Canon camera image format enum index",
+    )?;
+
+    node.on_set_parameters(|params| {
+        for param in params {
+            let valid = match param.name.as_str() {
+                "shutterspeed" => validate_parameter_index(param, SHUTTERSPEEDS),
+                "iso" => validate_parameter_index(param, ISOS),
+                "aperture" => validate_parameter_index(param, APERTURES),
+                "imageformat" => validate_parameter_index(param, IMAGEFORMATS),
+                _ => Ok(()),
+            };
+            if let Err(reason) = valid {
+                return SetParametersResult::failure(reason);
+            }
+        }
+        SetParametersResult::success()
+    });
+
+    println!(
+        "DSLR_PARAMETERS_GREEN node={} params=shutterspeed,iso,aperture,imageformat",
+        DSLR_NODE_NAME
+    );
+    Ok(())
+}
+
+fn declare_enum_parameter(
+    node: &ZNode,
+    name: &str,
+    default: u8,
+    values: &[&str],
+    description: &str,
+) -> Result<()> {
+    let mut descriptor = ParameterDescriptor::new(name, ParameterType::Integer);
+    descriptor.description = description.to_string();
+    descriptor.additional_constraints = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| format!("{index}:{value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    descriptor.integer_range = Some(IntegerRange {
+        from_value: 0,
+        to_value: values.len() as i64 - 1,
+        step: 1,
+    });
+    node.declare_parameter(name, ParameterValue::Integer(default as i64), descriptor)
+        .map_err(|e| anyhow!("declare DSLR parameter {name}: {e}"))?;
+    Ok(())
+}
+
+fn validate_parameter_index(param: &Parameter, values: &[&str]) -> std::result::Result<(), String> {
+    match &param.value {
+        ParameterValue::Integer(value) if *value >= 0 && (*value as usize) < values.len() => Ok(()),
+        ParameterValue::Integer(value) => Err(format!(
+            "{}={} is out of range 0..{}",
+            param.name,
+            value,
+            values.len().saturating_sub(1)
+        )),
+        other => Err(format!(
+            "{} must be an integer enum index, got {:?}",
+            param.name, other
+        )),
+    }
+}
+
+fn dslr_settings_from_parameters(node: &ZNode) -> Result<DslrCaptureSettings> {
+    Ok(DslrCaptureSettings {
+        shutterspeed: parameter_u8(node, "shutterspeed", DEFAULT_SHUTTERSPEED, SHUTTERSPEEDS)?,
+        iso: parameter_u8(node, "iso", DEFAULT_ISO, ISOS)?,
+        aperture: parameter_u8(node, "aperture", DEFAULT_APERTURE, APERTURES)?,
+        imageformat: parameter_u8(node, "imageformat", DEFAULT_IMAGEFORMAT, IMAGEFORMATS)?,
+    })
+}
+
+fn parameter_u8(node: &ZNode, name: &str, default: u8, values: &[&str]) -> Result<u8> {
+    let value = match node.get_parameter(name) {
+        Some(ParameterValue::Integer(value)) => value,
+        Some(other) => bail!("DSLR parameter {name} must be integer, got {other:?}"),
+        None => default as i64,
+    };
+    if value < 0 || value as usize >= values.len() {
+        bail!(
+            "DSLR parameter {name}={value} out of range 0..{}",
+            values.len().saturating_sub(1)
+        );
+    }
+    Ok(value as u8)
+}
+
 async fn run_dslr_service(once: bool) -> Result<()> {
     let identity = dslr_identity()?;
     let topics = dslr_topics(&identity);
@@ -387,6 +510,7 @@ async fn run_dslr_service(once: bool) -> Result<()> {
         .create_node(DSLR_NODE_NAME)
         .build()
         .map_err(|e| anyhow!("create Hiroz DSLR node: {e}"))?;
+    declare_dslr_parameters(&node)?;
     let mut service = node
         .create_service::<CaptureDslrImage>(&topics.service)
         .build()
@@ -405,7 +529,7 @@ async fn run_dslr_service(once: bool) -> Result<()> {
             .build()
             .map_err(|e| anyhow!("create status publisher {}: {e}", topics.status))?,
     };
-    let mut status = DslrServiceStatus::new(&topics);
+    let mut status = DslrServiceStatus::new(&topics, dslr_settings_from_parameters(&node)?);
     let mut heartbeat = tokio::time::interval(Duration::from_secs(DSLR_STATUS_HEARTBEAT_SECS));
 
     println!("DSLR_SERVICE_READY service={}", topics.service);
@@ -416,6 +540,7 @@ async fn run_dslr_service(once: bool) -> Result<()> {
     loop {
         let request = tokio::select! {
             _ = heartbeat.tick() => {
+                status.settings = dslr_settings_from_parameters(&node)?;
                 publish_dslr_status(&publishers.status, &status).await?;
                 continue;
             }
@@ -423,8 +548,9 @@ async fn run_dslr_service(once: bool) -> Result<()> {
                 request.map_err(|e| anyhow!("take DSLR capture request: {e}"))?
             }
         };
-        let message = request.message().clone();
-        let response = capture_ack(&message);
+        let settings = dslr_settings_from_parameters(&node)?;
+        let request_id = default_request_id();
+        let response = capture_ack(&request_id, &settings);
 
         request
             .reply(&response)
@@ -432,33 +558,29 @@ async fn run_dslr_service(once: bool) -> Result<()> {
             .map_err(|e| anyhow!("reply to DSLR capture request: {e}"))?;
         println!(
             "DSLR_ACK_GREEN request_id={} shutterspeed={} iso={} aperture={} imageformat={}",
-            response.request_id,
-            response.shutterspeed_label,
-            response.iso_label,
-            response.aperture_label,
-            response.imageformat_label
+            request_id,
+            enum_label(SHUTTERSPEEDS, settings.shutterspeed, "shutterspeed").unwrap_or("invalid"),
+            enum_label(ISOS, settings.iso, "iso").unwrap_or("invalid"),
+            enum_label(APERTURES, settings.aperture, "aperture").unwrap_or("invalid"),
+            enum_label(IMAGEFORMATS, settings.imageformat, "imageformat").unwrap_or("invalid")
         );
-        status.mark_capturing(&response.request_id);
+        status.settings = settings.clone();
+        status.mark_capturing(&request_id);
         publish_dslr_status(&publishers.status, &status).await?;
 
-        if response.accepted {
-            match capture_dslr_pair(&message, &identity) {
-                Ok(files) => {
-                    let cr2_len = files.cr2_bytes.len();
-                    let jpg_len = files.jpg_bytes.len();
-                    publish_dslr_images(&publishers, &topics, &identity, files).await?;
-                    status.mark_idle_after_capture(cr2_len, jpg_len);
-                    publish_dslr_status(&publishers.status, &status).await?;
-                }
-                Err(err) => {
-                    status.mark_error();
-                    let _ = publish_dslr_status(&publishers.status, &status).await;
-                    println!(
-                        "DSLR_CAPTURE_RED request_id={} error={err:#}",
-                        response.request_id
-                    );
-                    return Err(err);
-                }
+        match capture_dslr_pair(&request_id, &settings, &identity) {
+            Ok(files) => {
+                let cr2_len = files.cr2_bytes.len();
+                let jpg_len = files.jpg_bytes.len();
+                publish_dslr_images(&publishers, &topics, &identity, files).await?;
+                status.mark_idle_after_capture(cr2_len, jpg_len);
+                publish_dslr_status(&publishers.status, &status).await?;
+            }
+            Err(err) => {
+                status.mark_error();
+                let _ = publish_dslr_status(&publishers.status, &status).await;
+                println!("DSLR_CAPTURE_RED request_id={} error={err:#}", request_id);
+                return Err(err);
             }
         }
 
@@ -470,7 +592,7 @@ async fn run_dslr_service(once: bool) -> Result<()> {
     Ok(())
 }
 
-async fn request_dslr_capture(request: CaptureDslrImageRequest) -> Result<()> {
+async fn request_dslr_capture(_request: CaptureDslrImageRequest) -> Result<()> {
     let identity = dslr_identity()?;
     let topics = dslr_topics(&identity);
     let ctx = zenoh_context_builder()
@@ -486,115 +608,48 @@ async fn request_dslr_capture(request: CaptureDslrImageRequest) -> Result<()> {
         .map_err(|e| anyhow!("create DSLR capture client {}: {e}", topics.service))?;
 
     println!(
-        "DSLR_REQUEST service={} request_id={} shutterspeed={} iso={} aperture={} imageformat={}",
-        topics.service,
-        request.request_id,
-        request.shutterspeed,
-        request.iso,
-        request.aperture,
-        request.imageformat
+        "DSLR_REQUEST service={} request=empty",
+        topics.service
     );
 
     let response = client
-        .call_with_timeout(&request, Duration::from_secs(DEFAULT_SERVICE_TIMEOUT_SECS))
+        .call_with_timeout(
+            &CaptureDslrImageRequest {},
+            Duration::from_secs(DEFAULT_SERVICE_TIMEOUT_SECS),
+        )
         .await
         .map_err(|e| anyhow!("call DSLR capture service {}: {e}", topics.service))?;
 
-    println!(
-        "DSLR_ACK_RECEIVED_GREEN accepted={} request_id={} shutterspeed={} iso={} aperture={} imageformat={} status={}",
-        response.accepted,
-        response.request_id,
-        response.shutterspeed_label,
-        response.iso_label,
-        response.aperture_label,
-        response.imageformat_label,
-        response.status
-    );
+    println!("DSLR_ACK_RECEIVED_GREEN ack_msg={}", response.ack_msg);
     Ok(())
 }
 
 fn parse_capture_request(args: Vec<String>) -> Result<CaptureDslrImageRequest> {
-    let shutterspeed = parse_index_arg(
-        &args,
-        0,
-        DEFAULT_SHUTTERSPEED,
-        SHUTTERSPEEDS,
-        "shutterspeed",
-    )?;
-    let iso = parse_index_arg(&args, 1, DEFAULT_ISO, ISOS, "iso")?;
-    let aperture = parse_index_arg(&args, 2, DEFAULT_APERTURE, APERTURES, "aperture")?;
-    let imageformat = parse_index_arg(&args, 3, DEFAULT_IMAGEFORMAT, IMAGEFORMATS, "imageformat")?;
-    let request_id = args.get(4).cloned().unwrap_or_else(default_request_id);
-
-    Ok(CaptureDslrImageRequest {
-        shutterspeed,
-        iso,
-        aperture,
-        imageformat,
-        request_id,
-    })
+    if !args.is_empty() {
+        println!("DSLR_REQUEST_ARGS_IGNORED reason=service request is now empty; use ROS parameters on {DSLR_NODE_NAME} for camera settings");
+    }
+    Ok(CaptureDslrImageRequest {})
 }
 
-fn parse_index_arg(
-    args: &[String],
-    arg_index: usize,
-    default: u8,
-    values: &[&str],
-    name: &str,
-) -> Result<u8> {
-    let value = match args.get(arg_index) {
-        Some(s) => s
-            .parse::<u8>()
-            .with_context(|| format!("parse {name} index from '{s}'"))?,
-        None => default,
-    };
-    enum_label(values, value, name)?;
-    Ok(value)
-}
-
-fn capture_ack(request: &CaptureDslrImageRequest) -> CaptureDslrImageResponse {
-    let request_id = if request.request_id.trim().is_empty() {
-        default_request_id()
-    } else {
-        request.request_id.clone()
-    };
-
-    let status =
-        "ACK capture accepted; capture and Hiroz image publication will continue".to_string();
-
+fn capture_ack(request_id: &str, settings: &DslrCaptureSettings) -> CaptureDslrImageResponse {
     CaptureDslrImageResponse {
-        accepted: true,
-        request_id,
-        shutterspeed: request.shutterspeed,
-        shutterspeed_label: enum_label(SHUTTERSPEEDS, request.shutterspeed, "shutterspeed")
-            .unwrap_or("invalid")
-            .to_string(),
-        iso: request.iso,
-        iso_label: enum_label(ISOS, request.iso, "iso")
-            .unwrap_or("invalid")
-            .to_string(),
-        aperture: request.aperture,
-        aperture_label: enum_label(APERTURES, request.aperture, "aperture")
-            .unwrap_or("invalid")
-            .to_string(),
-        imageformat: request.imageformat,
-        imageformat_label: enum_label(IMAGEFORMATS, request.imageformat, "imageformat")
-            .unwrap_or("invalid")
-            .to_string(),
-        status,
+        ack_msg: format!(
+            "ACK capture accepted request_id={} shutterspeed={} iso={} aperture={} imageformat={}",
+            request_id,
+            enum_label(SHUTTERSPEEDS, settings.shutterspeed, "shutterspeed").unwrap_or("invalid"),
+            enum_label(ISOS, settings.iso, "iso").unwrap_or("invalid"),
+            enum_label(APERTURES, settings.aperture, "aperture").unwrap_or("invalid"),
+            enum_label(IMAGEFORMATS, settings.imageformat, "imageformat").unwrap_or("invalid")
+        ),
     }
 }
 
 fn capture_dslr_pair(
-    request: &CaptureDslrImageRequest,
+    request_id: &str,
+    settings: &DslrCaptureSettings,
     identity: &DslrIdentity,
 ) -> Result<DslrCaptureFiles> {
-    let request_id = if request.request_id.trim().is_empty() {
-        default_request_id()
-    } else {
-        request.request_id.clone()
-    };
-    let output_dir = PathBuf::from(DEFAULT_CAPTURE_DIR).join(&request_id);
+    let output_dir = PathBuf::from(DEFAULT_CAPTURE_DIR).join(request_id);
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("create capture directory {}", output_dir.display()))?;
 
@@ -607,22 +662,22 @@ fn capture_dslr_pair(
     let actual_shutter = set_radio_choice_by_index(
         &camera,
         &["shutterspeed"],
-        request.shutterspeed,
+        settings.shutterspeed,
         SHUTTERSPEEDS,
         "shutterspeed",
     )?;
-    let actual_iso = set_radio_choice_by_index(&camera, &["iso"], request.iso, ISOS, "iso")?;
+    let actual_iso = set_radio_choice_by_index(&camera, &["iso"], settings.iso, ISOS, "iso")?;
     let actual_aperture = set_radio_choice_by_index(
         &camera,
         &["aperture", "f-number"],
-        request.aperture,
+        settings.aperture,
         APERTURES,
         "aperture",
     )?;
     let actual_format = set_radio_choice_by_index(
         &camera,
         &["imageformat", "imageformatsd", "imageformatcf"],
-        request.imageformat,
+        settings.imageformat,
         IMAGEFORMATS,
         "imageformat",
     )?;
@@ -789,9 +844,10 @@ async fn publish_dslr_status(
 }
 
 impl DslrServiceStatus {
-    fn new(topics: &DslrTopics) -> Self {
+    fn new(topics: &DslrTopics, settings: DslrCaptureSettings) -> Self {
         Self {
             state: "idle",
+            settings,
             last_request_id: None,
             last_capture_unix_ns: None,
             last_cr2_bytes: None,
@@ -819,9 +875,15 @@ impl DslrServiceStatus {
 
     fn to_status_line(&self) -> String {
         format!(
-            "state={} heartbeat_unix_ns={} last_request_id={} last_capture_unix_ns={} last_cr2_bytes={} last_jpg_bytes={} image_cr2_topic={} image_jpg_topic={}",
+            "state={} heartbeat_unix_ns={} shutterspeed={} iso={} aperture={} imageformat={} last_request_id={} last_capture_unix_ns={} last_cr2_bytes={} last_jpg_bytes={} image_cr2_topic={} image_jpg_topic={}",
             self.state,
             unix_time_ns(),
+            enum_label(SHUTTERSPEEDS, self.settings.shutterspeed, "shutterspeed")
+                .unwrap_or("invalid"),
+            enum_label(ISOS, self.settings.iso, "iso").unwrap_or("invalid"),
+            enum_label(APERTURES, self.settings.aperture, "aperture").unwrap_or("invalid"),
+            enum_label(IMAGEFORMATS, self.settings.imageformat, "imageformat")
+                .unwrap_or("invalid"),
             self.last_request_id.as_deref().unwrap_or(""),
             self.last_capture_unix_ns
                 .map(|value| value.to_string())
