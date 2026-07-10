@@ -70,3 +70,9 @@ CHIRP CHIRP! From gphoto2-rs :: `datetime`
 Detailed service and image publishing requirements live in [SPEC_dslr_svc.md](SPEC_dslr_svc.md).
 
 🤔{✅/❌} a ROS2 service definition requests a capture with basic params exposed as enum selections and quickly ACKs the selected params; after gphoto2 capture the CR2 bytes and JPEG `sensor_msgs/CompressedImage` are published via Hiroz, while a status topic keeps the DSLR namespace visible to monitors
+
+# IMX708 stream service #
+
+Detailed continuous-stream requirements live in [SPEC_imx708_svc.md](SPEC_imx708_svc.md).
+
+🤔{✅/❌} separate workspace crate `imx708_stream` streams IMX708 frames over Hiroz with param-gated raw Image + JPEG CompressedImage publishers and a status heartbeat

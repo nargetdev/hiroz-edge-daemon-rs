@@ -1,17 +1,18 @@
-[workspace]
-members = [".", "imx708_stream"]
-resolver = "2"
-
 [package]
-name = "validation_at_pi4_gphoto2_rs"
+name = "imx708_stream"
 version = "0.1.0"
 edition = "2021"
-description = "Raspberry Pi validation harness for capturing one DSLR photo with gphoto2-rs"
+description = "Hiroz continuous IMX708 stream node via libcamera-rs"
+
+[[bin]]
+name = "imx708_stream"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-gphoto2 = "3.4"
 hiroz = { git = "https://github.com/ZettaScaleLabs/hiroz", rev = "7742f0dc187b025e2ac78d3d9947e1ad8b51f81d", default-features = false, features = ["config-builders", "rmw-zenoh", "lyrical"] }
 hiroz-msgs = { git = "https://github.com/ZettaScaleLabs/hiroz", rev = "7742f0dc187b025e2ac78d3d9947e1ad8b51f81d", default-features = false, features = ["std_msgs", "sensor_msgs", "lyrical"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+libcamera = "0.7"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
