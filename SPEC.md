@@ -76,3 +76,12 @@ Detailed service and image publishing requirements live in [SPEC_dslr_svc.md](SP
 Detailed continuous-stream requirements live in [SPEC_imx708_svc.md](SPEC_imx708_svc.md).
 
 🤔{✅/❌} separate workspace crate `imx708_stream` streams IMX708 frames over Hiroz with param-gated raw Image + JPEG CompressedImage publishers and a status heartbeat
+
+
+# Lepton 3.5 thermal stream service #
+
+Detailed thermal-stream requirements live in [SPEC_lepton_thermal_svc.md](SPEC_lepton_thermal_svc.md). Runs on `id1-cm5` (PureThermal Lepton 3.5).
+
+🤔{✅/❌} Python prototype on `id1-cm5` configures Lepton radiometry (AGC off, low gain, TLinear 0.01 K), captures Y16 via V4L2, and publishes mono16 `image_raw` + rgb8 `image_color` Images over Zenoh/Hiroz
+
+🤔{✅/❌} workspace crate `lepton_thermal_stream` replaces the prototype: pure-Rust V4L2 capture + UVC XU config, dual Image publishers, status heartbeat, `doctor` room-temp sanity verdict
