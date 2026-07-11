@@ -20,11 +20,10 @@ use hiroz::{Builder, ZBuf};
 use hiroz_msgs::builtin_interfaces::Time as RosTime;
 use hiroz_msgs::sensor_msgs::{CompressedImage, Image};
 use hiroz_msgs::std_msgs::{Header, String as RosString};
-use hiroz_msgs::ZMessage;
+use hiroz::msg::ZMessage;
 
 use camera::{
     doctor_single_request, hdr_fps_warning, list_cameras, run_capture_loop, CapturedFrame,
-    RAW_ENCODING,
 };
 
 const DEFAULT_ZENOH_ENDPOINT: &str = "tcp/172.31.1.252:7447";
@@ -580,7 +579,7 @@ async fn publish_frame(
             },
             height: frame.height,
             width: frame.width,
-            encoding: RAW_ENCODING.to_string(),
+            encoding: frame.encoding.clone(),
             is_bigendian: 0,
             step: frame.stride,
             data: ZBuf::from(frame.raw.clone()),
