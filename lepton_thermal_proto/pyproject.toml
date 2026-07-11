@@ -1,0 +1,10 @@
+[project]
+name = "lepton-thermal-proto"
+version = "0.1.0"
+description = "Phase 1 prototype: Lepton 3.5 radiometric Y16 -> sensor_msgs/Image over Zenoh (rmw_zenoh-compatible). See SPEC_lepton_thermal_svc.md."
+requires-python = ">=3.11"
+dependencies = [
+    "eclipse-zenoh>=1.0",
+    "linuxpy>=0.16",
+    "numpy>=1.24",
+]
