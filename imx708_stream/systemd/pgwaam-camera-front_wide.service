@@ -1,0 +1,15 @@
+[Unit]
+Description=pgwaam IMX708 stream (front_wide, camera index 1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blackfinfive
+WorkingDirectory=/home/blackfinfive/pgwaam_ws/hiroz-edge-daemon-rs
+ExecStart=/home/blackfinfive/pgwaam_ws/hiroz-edge-daemon-rs/target/release/imx708_stream stream --camera-name front_wide --camera-index 1 --jpeg-scale 3
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

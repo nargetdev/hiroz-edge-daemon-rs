@@ -1,0 +1,8 @@
+[book]
+title = "hiroz-edge-daemon-rs"
+description = "Edge camera / capture services for the pgwaam cell, built on Hiroz over Zenoh"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"

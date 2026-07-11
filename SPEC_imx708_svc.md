@@ -15,6 +15,14 @@ Host validation (this Pi):
 1 : imx708_wide … same modes
 ```
 
+Validated 2026-07-10 on `blackfinfive` (Pi 5, PiSP/BCM2712): camera index 0 is
+an ov5647, index 1 is the imx708_wide reporting **`SRGGB10_CSI2P`** (not
+SBGGR10). PiSP resolves an explicit 10-bit CSI2P raw request to
+`BGGR_PISP_COMP1` (compressed raw); the `cpu_from_raw` pipeline detects this
+and falls back to 16-bit uncompressed Bayer (`SRGGB16` requested →
+`SBGGR16` resolved), which streams and demosaics correctly. `Image.encoding`
+and demosaic CFA order always follow the resolved format.
+
 When the sensor is in HDR mode, libcamera may report **30 fps for every
 mode**. High-FPS crops (e.g. ~120 at 1536×864) require host/pipeline HDR
 off; the node does not invent FPS the pipeline does not expose. `doctor`

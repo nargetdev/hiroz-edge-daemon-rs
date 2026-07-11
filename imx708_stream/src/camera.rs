@@ -21,10 +21,12 @@ use libcamera::properties;
 use libcamera::request::{Request, ReuseFlag};
 use libcamera::stream::{Stream, StreamRole};
 
-use crate::jpeg_util::{jpeg_scale_dims, raw_to_jpeg};
+use crate::jpeg_util::{cpu_demosaicable, jpeg_scale_dims, raw_to_jpeg, BayerOrder};
 use crate::{JpegPipeline, StreamSettings};
 
-pub const RAW_ENCODING: &str = "SBGGR10_CSI2P";
+/// Preferred raw format; the pipeline may resolve to another Bayer order
+/// (e.g. SRGGB10_CSI2P on Pi 5 IMX708). The resolved format is reported.
+pub const PREFERRED_RAW_FORMAT: &str = "SBGGR10_CSI2P";
 
 #[derive(Debug, Clone)]
 pub struct SensorMode {
@@ -60,6 +62,8 @@ pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
     pub stride: u32,
+    /// Resolved libcamera pixel format (used as Image.encoding).
+    pub encoding: String,
     pub raw: Vec<u8>,
     pub jpeg: Option<Vec<u8>>,
     pub stamp_ns: u128,
@@ -153,7 +157,7 @@ pub fn doctor_single_request(camera_index: usize) -> Result<()> {
         let mut stream = cfgs
             .get_mut(0)
             .ok_or_else(|| anyhow!("missing raw stream config"))?;
-        if let Some(pf) = PixelFormat::parse("SBGGR10_CSI2P") {
+        if let Some(pf) = PixelFormat::parse(PREFERRED_RAW_FORMAT) {
             stream.set_pixel_format(pf);
         }
         stream.set_size(Size::new(1536, 864));
@@ -303,7 +307,7 @@ pub fn run_capture_loop(
             .get_mut(0)
             .ok_or_else(|| anyhow!("missing raw stream"))?;
         let pf = PixelFormat::parse(&mode.pixel_format)
-            .or_else(|| PixelFormat::parse("SBGGR10_CSI2P"))
+            .or_else(|| PixelFormat::parse(PREFERRED_RAW_FORMAT))
             .ok_or_else(|| anyhow!("cannot parse pixel format {}", mode.pixel_format))?;
         raw.set_pixel_format(pf);
         raw.set_size(Size::new(mode.width, mode.height));
@@ -336,6 +340,61 @@ pub fn run_capture_loop(
 
     cam.configure(&mut cfgs).context("configure camera")?;
 
+    let mut resolved_raw_format = cfgs
+        .get(0)
+        .ok_or_else(|| anyhow!("raw cfg missing after configure"))?
+        .get_pixel_format()
+        .to_string();
+
+    // Spec (cpu_from_raw): if the pipeline resolves the raw stream to something
+    // the CPU cannot demosaic (e.g. PiSP compressed raw), fall back to 16-bit
+    // uncompressed Bayer — still single-stream. Otherwise JPEG hard-fails with
+    // a clear reason.
+    if matches!(settings.jpeg_pipeline, JpegPipeline::CpuFromRaw)
+        && settings.publish_jpeg
+        && !cpu_demosaicable(&resolved_raw_format)
+    {
+        let fallback_name = BayerOrder::parse(&mode.pixel_format).map(|o| match o {
+            BayerOrder::Rggb => "SRGGB16",
+            BayerOrder::Bggr => "SBGGR16",
+            BayerOrder::Grbg => "SGRBG16",
+            BayerOrder::Gbrg => "SGBRG16",
+        });
+        if let Some(pf) = fallback_name.and_then(PixelFormat::parse) {
+            {
+                let mut raw = cfgs
+                    .get_mut(0)
+                    .ok_or_else(|| anyhow!("missing raw stream for 16-bit fallback"))?;
+                raw.set_pixel_format(pf);
+                raw.set_size(Size::new(mode.width, mode.height));
+            }
+            match cfgs.validate() {
+                CameraConfigurationStatus::Invalid => {
+                    eprintln!("IMX708_RAW_FALLBACK_INVALID requested={fallback_name:?}");
+                }
+                _ => {
+                    cam.configure(&mut cfgs)
+                        .context("configure camera (16-bit fallback)")?;
+                    resolved_raw_format = cfgs
+                        .get(0)
+                        .ok_or_else(|| anyhow!("raw cfg missing after fallback configure"))?
+                        .get_pixel_format()
+                        .to_string();
+                    println!(
+                        "IMX708_RAW_FALLBACK_16BIT requested={} resolved={}",
+                        fallback_name.unwrap_or("?"),
+                        resolved_raw_format
+                    );
+                }
+            }
+        }
+        if !cpu_demosaicable(&resolved_raw_format) {
+            eprintln!(
+                "IMX708_JPEG_UNSUPPORTED reason=resolved raw format {resolved_raw_format} not CPU-demosaicable and 16-bit fallback unavailable; JPEG will fail"
+            );
+        }
+    }
+
     let raw_cfg = cfgs
         .get(0)
         .ok_or_else(|| anyhow!("raw cfg missing after configure"))?;
@@ -344,6 +403,11 @@ pub fn run_capture_loop(
         .ok_or_else(|| anyhow!("raw stream handle missing"))?;
     let raw_stride = raw_cfg.get_stride();
     let raw_size = raw_cfg.get_size();
+    let raw_format = resolved_raw_format;
+    println!(
+        "IMX708_RAW_FORMAT_RESOLVED format={} size={}x{} stride={}",
+        raw_format, raw_size.width, raw_size.height, raw_stride
+    );
 
     let vf_stream = if matches!(settings.jpeg_pipeline, JpegPipeline::IspProcessed) {
         Some(
@@ -424,7 +488,7 @@ pub fn run_capture_loop(
     };
 
     while !stop.load(Ordering::Relaxed) {
-        let mut req = match rx.recv_timeout(Duration::from_millis(500)) {
+        let req = match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(r) => r,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -435,6 +499,7 @@ pub fn run_capture_loop(
             &raw_stream,
             raw_size,
             raw_stride,
+            &raw_format,
             vf_stream.as_ref(),
             vf_size,
             vf_stride,
@@ -478,6 +543,7 @@ fn extract_frame(
     raw_stream: &Stream,
     raw_size: Size,
     raw_stride: u32,
+    raw_format: &str,
     vf_stream: Option<&Stream>,
     vf_size: Option<Size>,
     vf_stride: Option<u32>,
@@ -517,6 +583,7 @@ fn extract_frame(
                     raw_size.width,
                     raw_size.height,
                     raw_stride,
+                    raw_format,
                     settings.jpeg_scale,
                     settings.jpeg_quality,
                 ) {
@@ -552,6 +619,7 @@ fn extract_frame(
         width: raw_size.width,
         height: raw_size.height,
         stride: raw_stride,
+        encoding: raw_format.to_string(),
         raw,
         jpeg,
         stamp_ns,

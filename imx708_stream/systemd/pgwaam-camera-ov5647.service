@@ -1,0 +1,15 @@
+[Unit]
+Description=pgwaam ov5647 stream (camera index 0)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blackfinfive
+WorkingDirectory=/home/blackfinfive/pgwaam_ws/hiroz-edge-daemon-rs
+ExecStart=/home/blackfinfive/pgwaam_ws/hiroz-edge-daemon-rs/target/release/imx708_stream stream --camera-name ov5647 --camera-index 0 --jpeg-scale 3
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
