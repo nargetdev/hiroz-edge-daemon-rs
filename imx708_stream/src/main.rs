@@ -1013,15 +1013,15 @@ pub fn unix_time_ns() -> u128 {
 }
 
 fn ros_time_from_ns(ns: u128) -> RosTime {
-    // libcamera timestamps are often monotonic ns; if huge/host-like use directly.
-    let host = unix_time_ns();
-    let use_ns = if ns > 1_000_000_000_000 {
-        // likely monotonic; prefer host now for ROS graph coherence
-        host
-    } else if ns > 0 {
+    // libcamera frame timestamps are CLOCK_MONOTONIC (ns since boot), not
+    // epoch. Anything below ~3 years of nanoseconds cannot be epoch time, so
+    // substitute host time for ROS graph coherence; genuine epoch values
+    // (~1.7e18 ns in 2026) pass through untouched.
+    const EPOCH_MIN_NS: u128 = 100_000_000_000_000_000; // ~3.17 years
+    let use_ns = if ns >= EPOCH_MIN_NS {
         ns
     } else {
-        host
+        unix_time_ns()
     };
     RosTime {
         sec: (use_ns / 1_000_000_000) as i32,
