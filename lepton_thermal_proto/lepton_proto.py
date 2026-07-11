@@ -226,6 +226,7 @@ def cmd_stream(args):
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("doctor")
